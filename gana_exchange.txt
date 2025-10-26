@@ -1,0 +1,481 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.20;
+
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {UD60x18, ud} from "@prb/math/src/UD60x18.sol";
+import {IUniswapV2Router02} from "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
+import {IUniswapV2Pair} from "@uniswap/v2-core/contracts/interfaces/IUniswapV2Pair.sol";
+import {IGANA} from "./interface/IGANA.sol";
+import {IReferral} from "./interface/IReferral.sol";
+import {Owned} from "solmate/src/auth/Owned.sol";
+import {_USDT, _ROUTER} from "/Const.sol";
+
+contract Staking is Owned {
+    event Staked(
+        address indexed user,
+        uint256 amount,
+        uint256 timestamp,
+        uint256 index,
+        uint256 stakeTime
+    );
+
+    event RewardPaid(
+        address indexed user,
+        uint256 reward,
+        uint40 timestamp,
+        uint256 index
+    );
+    event Transfer(address indexed from, address indexed to, uint256 amount);
+
+    uint256[3] public ratePerSec = [
+        46_296_296_296,
+        6_172_839_506,
+        5_787_037_037
+    ];
+
+
+    uint256[3] stakeDays = [1 days,15 days,30 days];
+
+
+    // uint256[3] public ratePerSec = [
+    //      66_666_666_666_666,
+    //     133_333_333_333_333,
+    //     250_000_000_000_000
+    // ];
+
+
+    // uint256[3] stakeDays = [1 minutes,15 minutes,30 minutes];
+
+    IUniswapV2Router02 constant ROUTER = IUniswapV2Router02(_ROUTER);
+    IERC20 constant USDT = IERC20(_USDT);
+
+    IGANA public GANA;
+
+    // IReferral public REFERRAL;
+
+    address public marketingAddress;
+    address public devAddress;
+    address public threesevenAddress;
+    address public buyAddress;
+    uint8 public back_Fee = 25;
+    uint8 public market_Fee = 5;
+    uint8 public threeseven_Fee = 37;
+
+    uint8 public constant decimals = 18;
+    string public constant name = "gana_Computility";
+    string public constant symbol = "gana_Computility";
+
+    uint256 public totalSupply;
+    mapping(address => uint256) public balances;
+    mapping(address => uint256) public userIndex;
+
+    mapping(address => Record[]) public userStakeRecord;
+    // mapping(address => uint256) public teamTotalInvestValue;
+    // mapping(address => uint256) public teamVirtuallyInvestValue;
+
+    uint8 immutable maxD = 30;
+
+    RecordTT[] public t_supply;
+
+    struct RecordTT {
+        uint40 stakeTime;
+        uint160 tamount;
+    }
+
+    struct Record {
+        uint40 stakeTime;
+        uint160 amount;
+        bool status;
+        uint8 stakeIndex;
+    }
+
+    modifier onlyEOA() {
+        require(tx.origin == msg.sender, "EOA");
+        _;
+    }
+
+
+
+    constructor(address marketingAddress_,address devAddress_) Owned(msg.sender) {
+        marketingAddress = marketingAddress_;
+        devAddress = devAddress_;
+        USDT.approve(address(ROUTER), type(uint256).max);
+    }
+
+    function setGANA(address _gana) external onlyOwner {
+        GANA = IGANA(_gana);
+        GANA.approve(address(ROUTER), type(uint256).max);
+    }
+
+    // function setTeamVirtuallyInvestValue(address _user, uint256 _value)
+    //     external
+    //     onlyOwner
+    // {
+    //     teamVirtuallyInvestValue[_user] = _value;
+    // }
+
+    function setMarketingAddress(address _account) external  onlyOwner{
+        marketingAddress = _account;
+    }
+    function setDevAddress(address _account) external  onlyOwner{
+        devAddress = _account;
+    }
+    function setThreesevenAddress(address _account) external  onlyOwner{
+        threesevenAddress = _account;
+    }
+
+    function setBuyAddress(address _account) external  onlyOwner{
+        buyAddress = _account;
+    }
+
+    function setBackFee(uint8 _backFee,uint8 _marketFee) external  onlyOwner{
+        back_Fee = _backFee;
+        market_Fee = _marketFee;
+    }
+    function setThreesevenFee(uint8 _threesevenFee) external  onlyOwner{
+        threeseven_Fee = _threesevenFee;
+    }
+
+    
+   
+    event RatePerSecUpdated(uint8 indexed index, uint256 oldValue, uint256 newValue);
+
+
+    
+    function setRatesPerSec(uint256 r0, uint256 r1, uint256 r2) external onlyOwner {
+        
+        uint256[3] memory secs = [stakeDays[0], stakeDays[1], stakeDays[2]];
+        require(r0 <= (1e18) / secs[0], "r0 too high");
+        require(r1 <= (1e18) / secs[1], "r1 too high");
+        require(r2 <= (1e18) / secs[2], "r2 too high");
+
+        uint256[3] memory old = ratePerSec;
+        ratePerSec[0] = r0;
+        ratePerSec[1] = r1;
+        ratePerSec[2] = r2;
+
+        emit RatePerSecUpdated(0, old[0], r0);
+        emit RatePerSecUpdated(1, old[1], r1);
+        emit RatePerSecUpdated(2, old[2], r2);
+    }
+
+    function network1In() public view returns (uint256 value) {
+        uint256 len = t_supply.length;
+        if (len == 0) return 0;
+        uint256 one_last_time = block.timestamp - 1 minutes;
+        uint256 last_supply = totalSupply;
+        //       |
+        // t0 t1 | t2 t3 t4 t5
+        //       |
+        for (uint256 i = len - 1; i >= 0; i--) {
+            RecordTT storage stake_tt = t_supply[i];
+            if (one_last_time > stake_tt.stakeTime) {
+                break;
+            } else {
+                last_supply = stake_tt.tamount;
+            }
+            if (i == 0) break;
+        }
+        return totalSupply - last_supply;
+    }
+
+    function maxStakeAmount() public view returns (uint256) {
+        uint256 lastIn = network1In();
+        uint112 reverseu = GANA.getReserveU();
+        uint256 p1 = reverseu / 10;
+        if (lastIn > p1) return 0;
+        else return Math.min256(p1 - lastIn, 1000 ether);
+    }
+
+    function stake(uint160 _amount, uint256 amountOutMin,uint8 _stakeIndex) external onlyEOA {
+        require(_amount <= maxStakeAmount(), "<1000");
+        require(_stakeIndex<=2,"<=2");
+        swapAndAddLiquidity(_amount, amountOutMin);
+        mint(msg.sender, _amount,_stakeIndex);
+    }
+
+
+    function swapAndAddLiquidity(uint160 _amount, uint256 amountOutMin)
+        private
+    {
+        USDT.transferFrom(msg.sender, address(this), _amount);
+
+        address[] memory path = new address[](2);
+        path = new address[](2);
+        path[0] = address(USDT);
+        path[1] = address(GANA);
+        uint256 balb = GANA.balanceOf(address(this));
+        ROUTER.swapExactTokensForTokensSupportingFeeOnTransferTokens(
+            _amount / 2,
+            amountOutMin,
+            path,
+            address(this),
+            block.timestamp
+        );
+        uint256 bala = GANA.balanceOf(address(this));
+        ROUTER.addLiquidity(
+            address(USDT),
+            address(GANA),
+            _amount / 2,
+            bala - balb,
+            0, // slippage is unavoidable
+            0, // slippage is unavoidable
+            address(0),
+            block.timestamp
+        );
+    }
+
+    function mint(address sender, uint160 _amount,uint8 _stakeIndex) private {
+        // require(REFERRAL.isBindReferral(sender),"!!bind");
+        RecordTT memory tsy;
+        tsy.stakeTime = uint40(block.timestamp);
+        tsy.tamount = uint160(totalSupply);
+        t_supply.push(tsy);
+
+        Record memory order;
+        order.stakeTime = uint40(block.timestamp);
+        order.amount = _amount;
+        order.status = false;
+        order.stakeIndex = _stakeIndex;
+
+        totalSupply += _amount;
+        balances[sender] += _amount;
+        Record[] storage cord = userStakeRecord[sender];
+        uint256 stake_index = cord.length;
+        cord.push(order);
+
+        emit Transfer(address(0), sender, _amount);
+        emit Staked(sender, _amount, block.timestamp, stake_index,stakeDays[_stakeIndex]);
+    }
+
+    function balanceOf(address account)
+        external
+        view
+        returns (uint256 balance)
+    {
+        Record[] storage cord = userStakeRecord[account];
+        if (cord.length > 0) {
+            for (uint256 i = cord.length - 1; i >= 0; i--) {
+                Record storage user_record = cord[i];
+                if (user_record.status == false) {
+                    balance += caclItem(user_record);
+                }
+                // else {
+                //     continue;
+                // }
+                if (i == 0) break;
+            }
+        }
+    }
+
+
+    function caclItem(Record storage user_record)
+    private
+    view
+    returns (uint256 reward)
+    {
+        UD60x18 principal = ud(user_record.amount);
+        uint256 t = _accrualSeconds(user_record);         
+        uint8 idx = user_record.stakeIndex;
+
+
+        uint256 factor = 1e18 + ratePerSec[idx] * t;       
+        UD60x18 growth = ud(factor);
+
+        reward = UD60x18.unwrap(principal.mul(growth));    
+    }
+
+    function _accrualSeconds(Record storage r) internal view returns (uint256 t) {
+        
+        uint40 st = r.stakeTime;
+        uint40 nowSec = uint40(block.timestamp);
+
+        uint40 maturity = st + uint40(stakeDays[r.stakeIndex]);
+        
+        uint40 end = nowSec < maturity ? nowSec : maturity;
+
+        
+        if (end <= st) return 0;
+
+        
+        uint40 acc = end - st;
+        return uint256(acc);
+    }
+
+
+    function rewardOfSlot(address user, uint8 index)
+        public
+        view
+        returns (uint256 reward)
+    {
+        Record storage user_record = userStakeRecord[user][index];
+        return caclItem(user_record);
+    }
+
+    function stakeCount(address user) external view returns (uint256 count) {
+        count = userStakeRecord[user].length;
+    }
+
+    function unstake(uint256 index) external onlyEOA returns (uint256) {
+        (uint256 reward, uint256 stake_amount) = burn(index);
+        uint256 bal_this = GANA.balanceOf(address(this));
+        uint256 usdt_this = USDT.balanceOf(address(this));
+        address[] memory path = new address[](2);
+        path = new address[](2);
+        path[0] = address(GANA);
+        path[1] = address(USDT);
+        ROUTER.swapTokensForExactTokens(
+            reward,
+            bal_this,
+            path,
+            address(this),
+            block.timestamp
+        );
+        uint256 bal_now = GANA.balanceOf(address(this));
+        uint256 usdt_now = USDT.balanceOf(address(this));
+        uint256 amount_gana = bal_this - bal_now;
+        uint256 amount_usdt = usdt_now - usdt_this;
+        uint256 interset;
+        if (amount_usdt > stake_amount) {
+            interset = amount_usdt - stake_amount;
+        }
+
+        uint256 buyBack_fee = (interset * back_Fee) / 100;
+        uint256 buyMarket_fee = (interset * market_Fee) / 100;
+        if(buyMarket_fee > 0){
+            USDT.transfer(marketingAddress, buyMarket_fee);
+        }
+        if(buyBack_fee > 0){
+            address[] memory backPath = new address[](2);
+            backPath = new address[](2);
+            backPath[0] = address(USDT);
+            backPath[1] = address(GANA);
+            ROUTER.swapExactTokensForTokensSupportingFeeOnTransferTokens(
+                buyBack_fee,
+                0,
+                backPath,
+                address(devAddress),
+                block.timestamp
+            );
+        }
+
+        uint256 senderUsdt=amount_usdt - buyBack_fee - buyMarket_fee;
+
+        USDT.transfer(msg.sender, senderUsdt);
+ 
+
+
+
+        uint256 buyThreeseven_Fee = (interset * threeseven_Fee) / 100;
+
+        uint256 threeseven_amount_gana = 0;
+        if(buyThreeseven_Fee > 0){
+            uint256 threeseven_bal_this = GANA.balanceOf(address(this));
+            uint256 threeseven_usdt_this = USDT.balanceOf(address(this));
+            address[] memory threeseven_path = new address[](2);
+            threeseven_path = new address[](2);
+            threeseven_path[0] = address(GANA);
+            threeseven_path[1] = address(USDT);
+            ROUTER.swapTokensForExactTokens(
+                buyThreeseven_Fee,
+                threeseven_bal_this,
+                threeseven_path,
+                address(this),
+                block.timestamp
+            );
+            uint256 threeseven_bal_now = GANA.balanceOf(address(this));
+            uint256 threeseven_usdt_now = USDT.balanceOf(address(this));
+            threeseven_amount_gana = threeseven_bal_this - threeseven_bal_now;
+            uint256 threeseven_amount_usdt = threeseven_usdt_now - threeseven_usdt_this;
+            USDT.transfer(threesevenAddress, threeseven_amount_usdt);
+        }
+
+        GANA.recycle(amount_gana+threeseven_amount_gana);
+        return reward;
+
+    }
+
+
+
+    function buyGANA(uint256 amountGana) public {
+        require(amountGana > 0, ">0");
+        
+        address[] memory backPath = new address[](2);
+        backPath = new address[](2);
+        backPath[0] = address(USDT);
+        backPath[1] = address(GANA);
+
+        uint256[] memory amountsIn = ROUTER.getAmountsIn(amountGana, backPath);
+        uint256 amountUSDT = amountsIn[0];
+        USDT.transferFrom(msg.sender, address(this), amountUSDT);
+        ROUTER.swapTokensForExactTokens(
+            amountGana,
+            amountUSDT,
+            backPath,
+            address(buyAddress),
+            block.timestamp
+        );
+    }
+
+    function burn(uint256 index)
+        private
+        returns (uint256 reward, uint256 amount)
+    {
+        address sender = msg.sender;
+        Record[] storage cord = userStakeRecord[sender];
+        Record storage user_record = cord[index];
+
+        uint256 stakeTime = user_record.stakeTime;
+        require(block.timestamp - stakeTime >= stakeDays[user_record.stakeIndex], "The time is not right");
+        require(user_record.status == false, "alw");
+
+        amount = user_record.amount;
+        totalSupply -= amount;
+        balances[sender] -= amount;
+        emit Transfer(sender, address(0), amount);
+
+        reward = caclItem(user_record);
+        user_record.status = true;
+
+        userIndex[sender] = userIndex[sender] + 1;
+
+        emit RewardPaid(sender, reward, uint40(block.timestamp), index);
+    }
+
+   
+
+    function isPreacher(address user) public view returns (bool) {
+        return balances[user] >= 100e18;
+    }
+
+    
+
+    function sync() external {
+        uint256 w_bal = IERC20(USDT).balanceOf(address(this));
+        address pair = GANA.uniswapV2Pair();
+        IERC20(USDT).transfer(pair, w_bal);
+        IUniswapV2Pair(pair).sync();
+    }
+
+    function emergencyWithdrawGANA(address to, uint256 _amount)
+        external
+        onlyOwner
+    {
+        GANA.transfer(to, _amount);
+    }
+
+    
+}
+
+library Math {
+    /**
+     * @dev Returns the smallest of two numbers.
+     */
+    function min(uint40 a, uint40 b) internal pure returns (uint40) {
+        return a < b ? a : b;
+    }
+
+    function min256(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a < b ? a : b;
+    }
+}
